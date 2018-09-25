@@ -1,5 +1,11 @@
 """零文档过滤模型文件"""
+from datetime import datetime
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn import metrics
 from collections import defaultdict
+from Logger import Logger
+import logging
+import os
 from tensorflow.python import debug as tf_debug
 import argparse
 import data_process as dp
@@ -15,6 +21,13 @@ from traitlets import (
     Bool,
     Unicode,
 )
+
+# 获取当前目录
+_get_abs_path = lambda path: os.path.normpath(os.path.join(os.getcwd(), path))
+# 初始化日志类
+Logger(logname=os.path.join(_get_abs_path('log'), 'dazer.log'), loglevel=1, logger="main")
+logger = logging.getLogger('main')
+
 
 
 def dd1_list():
@@ -41,6 +54,7 @@ class Dazer(Configurable):
     embedding_size = Int(50, help='词潜入的纬度').tag(config=True)
     train_file = Unicode('None', help='训练样本文件').tag(config=True)
     train_labels = Unicode('None', help='需要训练的分类标签').tag(config=True)
+    all_labels = Unicode('None', help='全分类标签').tag(config=True)
 
     test_file = Unicode('None', help='训练样本文件').tag(config=True)
     ckpt_path = Unicode('None', help='模型保存路径').tag(config=True)
@@ -168,6 +182,34 @@ class Dazer(Configurable):
             tf.summary.scalar('loss', loss)
             self.merged = tf.summary.merge_all()
 
+    def analysis_result(self, sess, test_df):
+        """分析预测结果"""
+        result = dd1_list()
+        for batch in dp.input_scale_data_test(test_df, self.max_pooling_num, batch_size=self.batch_size):
+            query_dict = batch['query_dict']
+            query_len_dict = batch['query_len_dict']
+            doc = batch['doc']
+            l_context = batch['l_context']
+            l_label = batch['l_label']
+            # 生成结果字典
+            result['real_label'] += l_label
+            result['context'] += l_context
+            for label, query in query_dict.items():
+                score = sess.run(self.pos_score, feed_dict={self.input_q: query, self.input_pos_d: doc,
+                                                            self.input_q_len: query_len_dict[label]})
+                result[label] += list(np.reshape(score, (-1,)))
+        result_df = pd.DataFrame(result)
+        # 自动获取标签
+        labels = [label for label, query in query_dict.items()]
+        # 写死标签顺序， 其他数据集需要修改此标签顺序
+        # labels = ['very negative', 'negative', 'neutral', 'positive', 'very positive']
+
+        result_df['pre_label'] = result_df[labels].idxmax(axis=1)
+        f1 = metrics.f1_score(result_df['real_label'], result_df['pre_label'], average='weighted')
+        result_report = classification_report(result_df['real_label'], result_df['pre_label'])
+        con_matrix = confusion_matrix(result_df['real_label'], result_df['pre_label'], labels=labels)
+        return result_df, result_report, f1, labels, con_matrix
+
     def test(self):
         """模型预测"""
         config = tf.ConfigProto()
@@ -175,60 +217,172 @@ class Dazer(Configurable):
         with tf.Session(config=config, graph=self.g) as sess:
             train_vars = [v for v in tf.trainable_variables()]
             saver = tf.train.Saver(var_list=train_vars)
-            saver.restore(sess, self.ckpt_path + '-77200')  # 是否自动读取最新的一次，还是要手动设置保存的第几次
+            saver.restore(sess, self.ckpt_path + '-77212')  # 是否自动读取最新的一次，还是要手动设置保存的第几次
             test_df = pd.read_csv(self.test_file, engine='python')
             # 打开调试模式
             # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
             # 定义结果
-            result = dd1_list()
-            for batch in dp.input_scale_data_test(test_df, self.max_pooling_num, batch_size=self.batch_size):
-                query_dict = batch['query_dict']
-                query_len_dict = batch['query_len_dict']
-                doc = batch['doc']
-                l_context = batch['l_context']
-                l_label = batch['l_label']
-                # 生成结果字典
-                result['real_label'] += l_label
-                result['context'] += l_context
-                for label, query in query_dict.items():
-                    score = sess.run(self.pos_score, feed_dict={self.input_q: query, self.input_pos_d: doc, self.input_q_len: query_len_dict[label]})
-                    result[label] += list(np.reshape(score, (-1,)))
-            result_df = pd.DataFrame(result)
+            result_df, result_report, f1, labels, con_matrix = self.analysis_result(sess, test_df)
+            logger.info('生成测试集预测统计，并保存具体预测结果：')
+            logger.info('\n'+result_report)
             result_df.to_csv(self.test_result_file)
 
-    def train(self):
-        """模型训练"""
+    # def train(self):
+    #     """单独一次零样本模型训练"""
+    #     config = tf.ConfigProto()
+    #     config.gpu_options.allow_growth = True
+    #     with tf.Session(config=config, graph=self.g) as sess:
+    #         train_vars = [v for v in tf.trainable_variables()]
+    #         saver = tf.train.Saver(var_list=train_vars, max_to_keep=3)
+    #         sess.run(tf.global_variables_initializer())
+    #         writer = tf.summary.FileWriter(self.summary_path, self.g)
+    #         train_df = pd.read_csv(self.train_file, engine='python')
+    #         test_df = pd.read_csv(self.test_file, engine='python')
+    #         step = 0
+    #         # 打开调试模式
+    #         # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+    #         logger.info('训练批次大小:{}'.format(self.batch_size))
+    #         for epoch in range(int(self.max_epochs)):
+    #             if epoch+1 % 25 == 0:
+    #                 sess.run(self.lr.assign(self.model_learning_rate / 5.0))
+    #             # sess.run(self.lr.assign(self.model_learning_rate * 0.95**epoch))
+    #             for batch in dp.input_scale_data_train(train_df, self.train_labels.split(','), batch_size=self.batch_size, min_len=self.max_pooling_num):
+    #                 query = batch['query']
+    #                 label = batch['label']
+    #                 pos_doc = batch['pos_doc']
+    #                 neg_doc = batch['neg_doc']
+    #                 query_len = batch['query_len']
+    #                 merged, ato, mto = sess.run([self.merged, self.adv_train_op, self.model_train_op], feed_dict={self.input_q: query, self.input_l: label, self.input_pos_d: pos_doc, self.input_neg_d: neg_doc, self.input_q_len: query_len})
+    #                 # 可视化
+    #                 writer.add_summary(merged, global_step=step)
+    #                 writer.flush()
+    #                 step += 1
+    #             # 每5次做一次验证并打印
+    #             if epoch % 5 == 0:
+    #                 logger.info('第{}次训练结果：'.format(epoch+1))
+    #                 logger.info('训练样本和零样本的准确率：')
+    #                 self.analysis_result(sess, train_df)
+    #                 logger.info('测试样本和零样本的准确率：')
+    #                 self.analysis_result(sess, test_df)
+    #             saver.save(sess, self.ckpt_path, global_step=step)
+    #             logger.info('第{}次epoch训练完成。'.format(epoch+1))
+    #         writer.close()
+    #     pass
+
+    def train_all(self):
+        """自动循环训练所有标签，使得每一个标签都做为零样本标签，并观察其泛化效果"""
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
-        with tf.Session(config=config, graph=self.g) as sess:
-            train_vars = [v for v in tf.trainable_variables()]
-            saver = tf.train.Saver(var_list=train_vars, max_to_keep=3)
-            sess.run(tf.global_variables_initializer())
-            writer = tf.summary.FileWriter(self.summary_path, self.g)
-            train_df = pd.read_csv(self.train_file, engine='python')
-            step = 0
-            # 打开调试模式
-            # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
-            print('训练批次大小:{}'.format(self.batch_size))
-            for epoch in range(int(self.max_epochs)):
-                if epoch+1 % 25 == 0:
-                    sess.run(self.lr.assign(self.model_learning_rate / 5.0))
-                # sess.run(self.lr.assign(self.model_learning_rate * 0.95**epoch))
-                for batch in dp.input_scale_data_train(train_df, self.train_labels.split(','), batch_size=self.batch_size, min_len=self.max_pooling_num):
-                    query = batch['query']
-                    label = batch['label']
-                    pos_doc = batch['pos_doc']
-                    neg_doc = batch['neg_doc']
-                    query_len = batch['query_len']
-                    merged, ato, mto = sess.run([self.merged, self.adv_train_op, self.model_train_op], feed_dict={self.input_q: query, self.input_l: label, self.input_pos_d: pos_doc, self.input_neg_d: neg_doc, self.input_q_len: query_len})
-                    # 可视化
-                    writer.add_summary(merged, global_step=step)
-                    writer.flush()
-                    step += 1
-                saver.save(sess, self.ckpt_path, global_step=step)
-                print('第{}次epoch训练完成。'.format(epoch+1))
-            writer.close()
-        pass
+        now_time = datetime.now().strftime('%Y%m%d%H%M')
+        train_df = pd.read_csv(self.train_file, engine='python')
+        test_df = pd.read_csv(self.test_file, engine='python')
+        logger.info('------------------------------------------------------------------------------------------------')
+        logger.info('启动全样本训练, 时间:{}'.format(now_time))
+
+        for zero_label, train_labels, train_data, test_data in reorganize_data(self.all_labels, train_df, test_df):
+            #  单独对negative零样本标签，进行调参
+            if zero_label != 'very positive':
+                continue
+            else:
+                # self.regular_term = 0.0005  # negative 正则项系数
+                # self.regular_term = 0.0001  # very negative 正则项系数
+                self.regular_term = 0.001  # positive ， very positive 正则项系数
+                self.adv_learning_rate = 0.01  # positive ， very positive 学习率
+
+            with tf.Session(config=config, graph=self.g) as sess:
+                train_vars = [v for v in tf.trainable_variables()]
+                saver = tf.train.Saver(var_list=train_vars, max_to_keep=3)
+                sess.run(tf.global_variables_initializer())
+                max_f1 = 0.0
+                best_test_result_report = ''
+                best_con_matrix_report = ''
+
+                step = 0
+                # 保存在特定标签下路径中
+                writer = tf.summary.FileWriter(self.summary_path.format(now_time, zero_label.replace(' ', '')), self.g)
+                logger.info('开启学习---零样本标签:{}'.format(zero_label))
+                logger.info(
+                    '本次训练embedding_size：{}. max_epochs：{}, batch_size: {}, regular_term：{}, adv_learning_rate:'
+                    '{}, epsilon：{}, adv_loss_term：{}'.format(self.embedding_size, self.max_epochs, self.batch_size
+                                                              , self.regular_term, self.adv_learning_rate,
+                                                              self.epsilon, self.adv_loss_term))
+                # 动态学习率
+                for epoch in range(int(self.max_epochs)):
+                    # 动态学习率
+                    # if epoch + 1 % 25 == 0:
+                    #     sess.run(self.lr.assign(self.model_learning_rate / 5.0))  # 倍数缩小设置方式
+                    #     sess.run(self.lr.assign(self.model_learning_rate * 0.95**epoch))  # 指数设置方式
+                    for batch in dp.input_scale_data_train(train_data, train_labels,
+                                                           batch_size=self.batch_size, min_len=self.max_pooling_num):
+                        query = batch['query']
+                        label = batch['label']
+                        pos_doc = batch['pos_doc']
+                        neg_doc = batch['neg_doc']
+                        query_len = batch['query_len']
+                        merged, ato, mto = sess.run([self.merged, self.adv_train_op, self.model_train_op],
+                                                    feed_dict={self.input_q: query, self.input_l: label,
+                                                               self.input_pos_d: pos_doc, self.input_neg_d: neg_doc,
+                                                               self.input_q_len: query_len})
+                        # 可视化
+                        writer.add_summary(merged, global_step=step)
+                        writer.flush()
+                        step += 1
+                    # 每5次做一次验证并打印
+                    if epoch % 5 == 0:
+                        logger.info('第{}次训练结果：'.format(epoch + 1))
+                        logger.info('训练样本的准确率：')
+                        train_result_df, train_result_report, train_f1, train_labels, train_con_matrix = self.analysis_result(sess, train_data)
+                        logger.info('\n'+train_result_report)
+                        logger.info('测试样本和零样本的准确率：')
+                        test_result_df, test_result_report, test_f1, test_labels, test_con_matrix = self.analysis_result(sess, test_data)
+                        logger.info('\n'+test_result_report)
+                        logger.info('测试样本和零样本的混淆矩阵：{}'.format(test_labels))
+                        test_con_matrix_report = con_matrix_2_str(test_labels, test_con_matrix)
+                        logger.info('\n' + test_con_matrix_report)
+                        if test_f1 > max_f1:
+                            # 保存权重值
+                            saver.save(sess, self.ckpt_path.format(now_time, zero_label.replace(' ', '')), global_step=step)
+                            # 记录最好结果的统计报告 和 混淆矩阵
+                            best_test_result_report = test_result_report
+                            best_con_matrix_report = test_con_matrix_report
+                            # 保存预测的结果
+                            test_result_df.to_csv(self.test_result_file.format(now_time, zero_label.replace(' ', '')))
+                            max_f1 = test_f1
+                    if epoch + 1 == int(self.max_epochs):
+                        logger.info('测试集上最好的结果：')
+                        logger.info('\n'+best_test_result_report)
+                        logger.info('\n' + best_con_matrix_report)
+                logger.info('第{}次epoch训练完成。'.format(epoch + 1))
+                writer.close()
+
+
+def reorganize_data(all_labels, train_df, test_df):
+    """重新组织训练数据"""
+    all_labels_list = all_labels.split(',')
+    for label in all_labels_list:
+        zero_labels = set([label])
+        train_labels = set(all_labels_list) - zero_labels
+        # 将零样本标签排除在训练集之外
+        train_data = train_df[True ^ train_df['label'].isin(zero_labels)]
+        # 将零样本标签数据和测试集合并
+        test_data = pd.concat([train_df[train_df['label'].isin(zero_labels)], test_df])
+        yield label, list(train_labels), train_data, test_data
+
+
+def con_matrix_2_str(labels, con_matrix):
+    out_str = "混淆矩阵\t"
+    # 打印第一行标签
+    for i in range(len(labels)):
+        out_str += labels[i] + "\t"
+    # 换行
+    out_str += '\n'
+    # 打印混淆矩阵
+    for i in range(len(con_matrix)):
+        out_str += labels[i] + "\t"
+        for j in range(len(con_matrix[i])):
+            out_str += str(con_matrix[i][j]) + '\t'
+        out_str += '\n'
+    return out_str
 
 
 if __name__ == '__main__':
@@ -245,7 +399,7 @@ if __name__ == '__main__':
     # 训练模型
     dazer = Dazer(config=conf)
     if args.train:
-        dazer.train()
+        dazer.train_all()
     else:
         dazer.test()
 

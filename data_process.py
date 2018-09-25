@@ -59,13 +59,14 @@ def input_scale_data_train(train_df, labels,  min_len, batch_size=16):
             batch = {'query': query, 'label': label, 'pos_doc': pos_doc, 'neg_doc': neg_doc, 'query_len': query_len}
             yield batch
             l_q, l_q_len, l_l, l_d, l_d_aux = [], [], [], [], []
-    # if len(l_q) > 0:
-    #     query = pad_space(l_q)
-    #     label = np.array(l_l, dtype=np.int)
-    #     pos_doc = pad_space(l_d)
-    #     neg_doc = pad_space(l_d_aux)
-    #     batch = {'query': query, 'label': label, 'pos_doc': pos_doc, 'neg_doc': neg_doc}
-    #     yield batch
+    if len(l_q) > 0:
+        query = pad_space(l_q)
+        query_len = np.array(l_q_len, dtype=np.int32)
+        label = np.array(l_l, dtype=np.int)
+        pos_doc = pad_space(l_d, min_len)
+        neg_doc = pad_space(l_d_aux, min_len)
+        batch = {'query': query, 'label': label, 'pos_doc': pos_doc, 'neg_doc': neg_doc, 'query_len': query_len}
+        yield batch
 
 
 def extend_arr(value, shape, dtype=np.int32):
