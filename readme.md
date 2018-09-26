@@ -36,7 +36,7 @@ Movie Review数据集，下载地址http://www.cs.cornell.edu/people/pabo/movie-
 
 基于以上两个问题，对论文进行了复现，并基于Movie Review数据集给出了评测结果。
 
-需要注意的是，评测数据集和论文的测试集有区别，论文中的测试集数据只包含未知标签数据，而为了和现实的环境更吻合，我们的评测数据集除了未知标签的数据外，还混合了其他标签的测试数据。评测结果如下：
+需要注意的是，评测数据集和论文的测试集有区别，论文中的测试集数据只包含未知标签数据，而为了和现实的环境更吻合，我们的评测数据集除了未知标签的数据外，还混合了其他标签的测试数据。评测结果如下，其中一行代表一个零样本模型，每列代表模型在各个类别上的评测结果：
 
 ![report](https://raw.githubusercontent.com/LiuNingGit/DAZER/master/imags/2018-09-25-20-01-05.jpg)
 
@@ -76,7 +76,7 @@ Movie Review数据集，下载地址http://www.cs.cornell.edu/people/pabo/movie-
 
    **这里我们得出了第二个问题的原因：由于数据、模型的随机性，造成距离接近的两类数据很容易混杂起来，无法单从相似度这一个纬度上将其区分开来。**
 
-示意图如下：
+    示意图如下：
 
 ![](https://raw.githubusercontent.com/LiuNingGit/DAZER/master/imags/20180926170414.jpg)
 
